@@ -536,15 +536,6 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px;
 </div>
 
 <script type="module">
-const WEIGHT = 72, HEIGHT = 173, AGE = 22;
-// BMR Harris-Benedict homme: 88.362 + 13.397*P + 4.799*T - 5.677*A
-const BMR_RAW = Math.round(88.362 + 13.397*WEIGHT + 4.799*HEIGHT - 5.677*AGE); // ~1774
-const TDEE_BASE = Math.round(BMR_RAW * 1.375); // sédentaire-léger (étudiant) ~2440
-const MACRO_PROT_TARGET = Math.round(WEIGHT * 2); // 2g/kg
-const MACRO_GLUC_TARGET = Math.round((TDEE_BASE * 0.50) / 4);
-const MACRO_LIP_TARGET = Math.round((TDEE_BASE * 0.30) / 9);
-
-// ---- FIREBASE ----
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getFirestore, collection, getDocs, addDoc, deleteDoc, doc, updateDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
@@ -560,6 +551,23 @@ const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
 const COLLECTION = 'entries';
 
+window._db = db;
+window._fbFns = { collection, getDocs, addDoc, deleteDoc, doc, updateDoc, query, orderBy };
+
+// Init after Firebase ready
+window._firebaseReady = true;
+document.dispatchEvent(new Event('firebaseReady'));
+</script>
+
+<script>
+const WEIGHT = 72, HEIGHT = 173, AGE = 22;
+const BMR_RAW = Math.round(88.362 + 13.397*WEIGHT + 4.799*HEIGHT - 5.677*AGE);
+const TDEE_BASE = Math.round(BMR_RAW * 1.375);
+const MACRO_PROT_TARGET = Math.round(WEIGHT * 2);
+const MACRO_GLUC_TARGET = Math.round((TDEE_BASE * 0.50) / 4);
+const MACRO_LIP_TARGET = Math.round((TDEE_BASE * 0.30) / 9);
+
+let db, fbFns;
 let entries = [];
 let currentType = 'gym';
 let exCount = 0;
@@ -567,25 +575,27 @@ let exCount = 0;
 async function loadEntries() {
   try {
     showSyncStatus('⏳ Chargement...');
+    const { collection, getDocs, query, orderBy } = fbFns;
     const q = query(collection(db, COLLECTION), orderBy('id', 'desc'));
     const snap = await getDocs(q);
     entries = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
     showSyncStatus('✅ Synchronisé');
   } catch(e) {
-    // Fallback to localStorage if offline
     entries = JSON.parse(localStorage.getItem('trainlog_v2') || '[]');
     showSyncStatus('⚠️ Hors ligne');
   }
 }
 
 async function save() {
-  // Always keep localStorage as backup
   localStorage.setItem('trainlog_v2', JSON.stringify(entries));
 }
 
 async function saveToFirebase(entry) {
   try {
-    const docRef = await addDoc(collection(db, COLLECTION), entry);
+    const { collection, addDoc } = fbFns;
+    const clean = JSON.parse(JSON.stringify(entry));
+    delete clean._docId;
+    const docRef = await addDoc(collection(db, COLLECTION), clean);
     entry._docId = docRef.id;
     showSyncStatus('✅ Synchronisé');
   } catch(e) {
@@ -595,10 +605,30 @@ async function saveToFirebase(entry) {
 
 async function deleteFromFirebase(entry) {
   try {
+    const { doc, deleteDoc } = fbFns;
     if(entry._docId) await deleteDoc(doc(db, COLLECTION, entry._docId));
-    showSyncStatus('✅ Synchronisé');
   } catch(e) { console.error(e); }
 }
+
+async function updateInFirebase(entry) {
+  try {
+    const { doc, updateDoc } = fbFns;
+    if(entry._docId) {
+      const ref = doc(db, COLLECTION, entry._docId);
+      const data = JSON.parse(JSON.stringify(entry));
+      delete data._docId;
+      await updateDoc(ref, data);
+      showSyncStatus('✅ Synchronisé');
+    }
+  } catch(e) { console.error(e); }
+}
+
+function showSyncStatus(msg) {
+  const el = document.getElementById('syncStatus');
+  if(el) { el.textContent = msg; el.style.opacity='1'; setTimeout(()=>el.style.opacity='0.5', 2000); }
+}
+
+const COLLECTION = 'entries';
 
 async function updateInFirebase(entry) {
   try {
@@ -618,7 +648,9 @@ function showSyncStatus(msg) {
 }
 
 // ---- INIT ----
-document.addEventListener('DOMContentLoaded', async () => {
+async function initApp() {
+  db = window._db;
+  fbFns = window._fbFns;
   const today = new Date().toISOString().split('T')[0];
   ['gymDate','runDate','walkDate'].forEach(id => { const el=document.getElementById(id); if(el) el.value=today; });
   document.getElementById('headerDate').innerHTML = new Date().toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'}) + '<br><span style="color:var(--muted)">72 kg · 173 cm · 22 ans</span>';
@@ -627,7 +659,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   updateWalkEstimate();
   await loadEntries();
   updateDashboard();
-});
+}
+
+document.addEventListener('firebaseReady', initApp);
 
 // ---- TABS ----
 function switchTab(tab) {
